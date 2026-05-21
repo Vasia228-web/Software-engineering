@@ -30,6 +30,12 @@ BASE_POINTS = np.array(
     dtype=float,
 )
 ALLOWED_COUNTS = (5, 10, 20)
+MODE_LABELS = {
+    "all": "Усі",
+    "lagrange": "Лагранж",
+    "lsm": "МНК",
+}
+LABEL_TO_MODE = {label: key for key, label in MODE_LABELS.items()}
 
 
 @dataclass
@@ -247,6 +253,7 @@ class ApproximationApp:
 
         self.active_dataset = tk.StringVar(value="5")
         self.degree_var = tk.StringVar(value="3")
+        self.display_mode_var = tk.StringVar(value=MODE_LABELS["all"])
         self.status_var = tk.StringVar(
             value="Оберіть набір точок або відредагуйте його через поле нижче."
         )
@@ -257,11 +264,15 @@ class ApproximationApp:
         self.figure: Figure | None = None
         self.canvas: FigureCanvasTkAgg | None = None
         self.axes: np.ndarray | None = None
+        self.residual_figure: Figure | None = None
+        self.residual_canvas: FigureCanvasTkAgg | None = None
+        self.residual_axis = None
 
         self.build_layout()
         self.load_dataset_into_editor("5")
         self.refresh_summary()
         self.refresh_plots()
+        self.refresh_residual_plot()
 
     def build_layout(self) -> None:
         outer = ttk.Frame(self.root, padding=12)
@@ -304,23 +315,37 @@ class ApproximationApp:
         degree_combo.grid(row=1, column=1, sticky="w", padx=(8, 0), pady=(8, 0))
         degree_combo.bind("<<ComboboxSelected>>", self.on_degree_changed)
 
+        ttk.Label(dataset_frame, text="Режим показу:").grid(
+            row=2, column=0, sticky="w", pady=(8, 0)
+        )
+
+        mode_combo = ttk.Combobox(
+            dataset_frame,
+            textvariable=self.display_mode_var,
+            values=list(MODE_LABELS.values()),
+            state="readonly",
+            width=12,
+        )
+        mode_combo.grid(row=2, column=1, sticky="w", padx=(8, 0), pady=(8, 0))
+        mode_combo.bind("<<ComboboxSelected>>", self.on_mode_changed)
+
         ttk.Button(
             dataset_frame,
             text="Застосувати точки",
             command=self.apply_active_dataset,
-        ).grid(row=2, column=0, columnspan=2, sticky="we", pady=(10, 4))
+        ).grid(row=3, column=0, columnspan=2, sticky="we", pady=(10, 4))
 
         ttk.Button(
             dataset_frame,
             text="Скинути набір",
             command=self.reset_active_dataset,
-        ).grid(row=3, column=0, columnspan=2, sticky="we", pady=4)
+        ).grid(row=4, column=0, columnspan=2, sticky="we", pady=4)
 
         ttk.Button(
             dataset_frame,
             text="Згенерувати 10/20 з 5 точок",
             command=self.regenerate_extended_datasets,
-        ).grid(row=4, column=0, columnspan=2, sticky="we", pady=(4, 0))
+        ).grid(row=5, column=0, columnspan=2, sticky="we", pady=(4, 0))
 
         editor_frame = ttk.LabelFrame(left, text="Редактор точок", padding=10)
         editor_frame.pack(fill="both", expand=True, pady=(12, 0))
@@ -364,9 +389,27 @@ class ApproximationApp:
             justify="left",
         ).pack(anchor="w")
 
-        self.summary_text = tk.Text(summary_frame, wrap="word", height=14, font=("Courier New", 10))
-        self.summary_text.pack(fill="both", expand=True, pady=(10, 0))
+        detail_frame = ttk.Frame(summary_frame)
+        detail_frame.pack(fill="both", expand=True, pady=(10, 0))
+
+        self.summary_text = tk.Text(
+            detail_frame,
+            wrap="word",
+            height=14,
+            width=70,
+            font=("Courier New", 10),
+        )
+        self.summary_text.pack(side="left", fill="both", expand=True)
         self.summary_text.configure(state="disabled")
+
+        residual_frame = ttk.LabelFrame(detail_frame, text="Діаграма залишків", padding=8)
+        residual_frame.pack(side="right", fill="both", expand=False, padx=(12, 0))
+
+        self.residual_figure = Figure(figsize=(3.4, 3.0), dpi=100, constrained_layout=True)
+        self.residual_axis = self.residual_figure.add_subplot(111)
+        self.residual_canvas = FigureCanvasTkAgg(self.residual_figure, master=residual_frame)
+        self.residual_canvas.draw()
+        self.residual_canvas.get_tk_widget().pack(fill="both", expand=True)
 
     def dataset_as_text(self, dataset: DatasetState) -> str:
         return "\n".join(
@@ -388,7 +431,8 @@ class ApproximationApp:
             dense_x = build_dense_domain(dataset.xs, points=5)
             dense_y = lagrange(dense_x, dataset.xs, dataset.ys)
             analysis = analyse_dataset(dataset, degree)
-            lines.append(f"Набір {name} точок ({source}):")
+            marker = ">>" if name == self.active_dataset.get() else "  "
+            lines.append(f"{marker} Набір {name} точок ({source}):")
             lines.extend(
                 f"  ({x_value:.3f}, {y_value:.3f})"
                 for x_value, y_value in zip(dataset.xs, dataset.ys, strict=True)
@@ -422,65 +466,107 @@ class ApproximationApp:
             return
 
         degree = int(self.degree_var.get())
+        mode = self.current_mode()
 
         for row_index, name in enumerate(("5", "10", "20")):
             dataset = self.datasets[name]
             analysis = analyse_dataset(dataset, degree)
             lagrange_axis = self.axes[row_index, 0]
             lsm_axis = self.axes[row_index, 1]
+            active = name == self.active_dataset.get()
 
-            lagrange_axis.clear()
-            lagrange_axis.scatter(dataset.xs, dataset.ys, color="#0d6efd", zorder=3)
-            lagrange_axis.plot(
-                analysis.x_plot,
-                analysis.y_lagrange,
-                color="#f97316",
-                linewidth=2,
-            )
-            lagrange_axis.set_title(f"Лагранж - {name} точок", fontsize=10)
-            lagrange_axis.grid(True, alpha=0.25)
-            lagrange_axis.set_xlim(
-                analysis.lagrange_limits[0],
-                analysis.lagrange_limits[1],
-            )
-            lagrange_axis.set_ylim(
-                analysis.lagrange_limits[2],
-                analysis.lagrange_limits[3],
-            )
-            lagrange_axis.set_xlabel("x")
-            lagrange_axis.set_ylabel("y")
+            lagrange_axis.set_visible(mode in ("all", "lagrange"))
+            lsm_axis.set_visible(mode in ("all", "lsm"))
 
-            lsm_axis.clear()
-            lsm_axis.scatter(dataset.xs, dataset.ys, color="#0d6efd", zorder=3)
-            lsm_axis.plot(
-                analysis.x_plot,
-                analysis.y_lsm,
-                color="#0f766e",
-                linewidth=2,
-            )
-            lsm_axis.set_title(f"МНК - {name} точок", fontsize=10)
-            lsm_axis.grid(True, alpha=0.25)
-            lsm_axis.set_xlim(
-                analysis.lsm_limits[0],
-                analysis.lsm_limits[1],
-            )
-            lsm_axis.set_ylim(
-                analysis.lsm_limits[2],
-                analysis.lsm_limits[3],
-            )
-            lsm_axis.set_xlabel("x")
-            lsm_axis.set_ylabel("y")
-            lsm_axis.text(
-                0.02,
-                0.96,
-                f"MSE={analysis.mse:.4f}\nMAE={analysis.mae:.4f}\nR²={analysis.r2:.4f}",
-                transform=lsm_axis.transAxes,
-                va="top",
-                fontsize=8.5,
-                bbox={"facecolor": "white", "alpha": 0.85, "edgecolor": "#94a3b8"},
-            )
+            if lagrange_axis.get_visible():
+                lagrange_axis.clear()
+                lagrange_axis.scatter(dataset.xs, dataset.ys, color="#0d6efd", zorder=3)
+                lagrange_axis.plot(
+                    analysis.x_plot,
+                    analysis.y_lagrange,
+                    color="#f97316",
+                    linewidth=2,
+                )
+                lagrange_axis.set_title(f"Лагранж - {name} точок", fontsize=10)
+                lagrange_axis.grid(True, alpha=0.25)
+                lagrange_axis.set_xlim(
+                    analysis.lagrange_limits[0],
+                    analysis.lagrange_limits[1],
+                )
+                lagrange_axis.set_ylim(
+                    analysis.lagrange_limits[2],
+                    analysis.lagrange_limits[3],
+                )
+                lagrange_axis.set_xlabel("x")
+                lagrange_axis.set_ylabel("y")
+                self.highlight_axis(lagrange_axis, active)
+
+            if lsm_axis.get_visible():
+                lsm_axis.clear()
+                lsm_axis.scatter(dataset.xs, dataset.ys, color="#0d6efd", zorder=3)
+                lsm_axis.plot(
+                    analysis.x_plot,
+                    analysis.y_lsm,
+                    color="#0f766e",
+                    linewidth=2,
+                )
+                lsm_axis.set_title(f"МНК - {name} точок", fontsize=10)
+                lsm_axis.grid(True, alpha=0.25)
+                lsm_axis.set_xlim(
+                    analysis.lsm_limits[0],
+                    analysis.lsm_limits[1],
+                )
+                lsm_axis.set_ylim(
+                    analysis.lsm_limits[2],
+                    analysis.lsm_limits[3],
+                )
+                lsm_axis.set_xlabel("x")
+                lsm_axis.set_ylabel("y")
+                lsm_axis.text(
+                    0.02,
+                    0.96,
+                    f"MSE={analysis.mse:.4f}\nMAE={analysis.mae:.4f}\nR²={analysis.r2:.4f}",
+                    transform=lsm_axis.transAxes,
+                    va="top",
+                    fontsize=8.5,
+                    bbox={"facecolor": "white", "alpha": 0.85, "edgecolor": "#94a3b8"},
+                )
+                self.highlight_axis(lsm_axis, active)
 
         self.canvas.draw_idle()
+
+    def refresh_residual_plot(self) -> None:
+        if self.residual_axis is None or self.residual_canvas is None:
+            return
+
+        dataset = self.datasets[self.active_dataset.get()]
+        analysis = analyse_dataset(dataset, int(self.degree_var.get()))
+        self.residual_axis.clear()
+
+        indexes = np.arange(dataset.count)
+        colors = ["#ef4444" if value < 0 else "#22c55e" for value in analysis.residuals]
+        self.residual_axis.bar(indexes, analysis.residuals, color=colors, width=0.65)
+        self.residual_axis.axhline(0.0, color="#334155", linewidth=1)
+        self.residual_axis.set_title(
+            f"Залишки МНК - {dataset.count} точок",
+            fontsize=10,
+        )
+        self.residual_axis.set_xlabel("Індекс точки")
+        self.residual_axis.set_ylabel("y - ŷ")
+        self.residual_axis.set_xticks(indexes)
+        self.residual_axis.grid(True, axis="y", alpha=0.25)
+        self.residual_canvas.draw_idle()
+
+    def highlight_axis(self, axis, active: bool) -> None:
+        axis.set_facecolor("#fffbea" if active else "white")
+        border_color = "#f59e0b" if active else "#94a3b8"
+        border_width = 2.3 if active else 1.0
+        for spine in axis.spines.values():
+            spine.set_color(border_color)
+            spine.set_linewidth(border_width)
+
+    def current_mode(self) -> str:
+        return LABEL_TO_MODE[self.display_mode_var.get()]
 
     def load_dataset_into_editor(self, name: str) -> None:
         if self.point_editor is None:
@@ -494,13 +580,37 @@ class ApproximationApp:
         )
 
     def on_dataset_changed(self, _event: object | None = None) -> None:
-        self.load_dataset_into_editor(self.active_dataset.get())
+        self.switch_dataset(self.active_dataset.get())
 
     def on_degree_changed(self, _event: object | None = None) -> None:
         self.refresh_summary()
         self.refresh_plots()
+        self.refresh_residual_plot()
         self.status_var.set(
             f"Ступінь МНК змінено на {self.degree_var.get()}. Параметри перераховано."
+        )
+
+    def on_mode_changed(self, _event: object | None = None) -> None:
+        self.switch_mode(self.display_mode_var.get())
+
+    def switch_dataset(self, name: str) -> None:
+        self.active_dataset.set(name)
+        self.load_dataset_into_editor(name)
+        self.refresh_summary()
+        self.refresh_plots()
+        self.refresh_residual_plot()
+
+    def switch_mode(self, mode: str) -> None:
+        if mode in LABEL_TO_MODE:
+            self.display_mode_var.set(mode)
+        elif mode in MODE_LABELS:
+            self.display_mode_var.set(MODE_LABELS[mode])
+        else:
+            raise ValueError("Невідомий режим відображення.")
+
+        self.refresh_plots()
+        self.status_var.set(
+            f"Режим відображення змінено на «{self.display_mode_var.get()}»."
         )
 
     def apply_active_dataset(self) -> None:
@@ -520,6 +630,7 @@ class ApproximationApp:
         self.datasets[name] = DatasetState(name=name, xs=xs, ys=ys, generated=False)
         self.refresh_summary()
         self.refresh_plots()
+        self.refresh_residual_plot()
         self.status_var.set(
             f"Набір {name} оновлено. Збережено {expected_count} коректних точок."
         )
@@ -536,6 +647,7 @@ class ApproximationApp:
         self.load_dataset_into_editor(name)
         self.refresh_summary()
         self.refresh_plots()
+        self.refresh_residual_plot()
 
     def regenerate_extended_datasets(self) -> None:
         source = self.datasets["5"]
@@ -543,6 +655,7 @@ class ApproximationApp:
         self.datasets["20"] = build_generated_dataset(source, 20)
         self.refresh_summary()
         self.refresh_plots()
+        self.refresh_residual_plot()
         self.status_var.set(
             "Набори 10 і 20 точок перевизначено лінійною інтерполяцією з базових 5 точок."
         )
