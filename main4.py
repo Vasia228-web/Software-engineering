@@ -688,8 +688,11 @@ class ApproximationApp:
 
     def stop_animation(self) -> None:
         if self.animation is not None:
-            self.animation.event_source.stop()
+            event_source = self.animation.event_source
+            if event_source is not None:
+                event_source.stop()
             self.animation = None
+        self.animation_context = {}
 
     def animate_lagrange(self, frame: int) -> None:
         if not self.animation_context.get("lagrange_visible"):
