@@ -14,6 +14,7 @@ CACHE_DIR.mkdir(exist_ok=True)
 os.environ.setdefault("MPLCONFIGDIR", str(MPL_CONFIG_DIR))
 os.environ.setdefault("XDG_CACHE_HOME", str(CACHE_DIR))
 
+from matplotlib.animation import FuncAnimation
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 import numpy as np
@@ -267,6 +268,8 @@ class ApproximationApp:
         self.residual_figure: Figure | None = None
         self.residual_canvas: FigureCanvasTkAgg | None = None
         self.residual_axis = None
+        self.animation: FuncAnimation | None = None
+        self.animation_context: dict[str, object] = {}
 
         self.build_layout()
         self.load_dataset_into_editor("5")
@@ -346,6 +349,12 @@ class ApproximationApp:
             text="Згенерувати 10/20 з 5 точок",
             command=self.regenerate_extended_datasets,
         ).grid(row=5, column=0, columnspan=2, sticky="we", pady=(4, 0))
+
+        ttk.Button(
+            dataset_frame,
+            text="Анімувати активний набір",
+            command=self.start_animation,
+        ).grid(row=6, column=0, columnspan=2, sticky="we", pady=(8, 0))
 
         editor_frame = ttk.LabelFrame(left, text="Редактор точок", padding=10)
         editor_frame.pack(fill="both", expand=True, pady=(12, 0))
@@ -568,6 +577,162 @@ class ApproximationApp:
     def current_mode(self) -> str:
         return LABEL_TO_MODE[self.display_mode_var.get()]
 
+    def dataset_row_index(self, name: str) -> int:
+        return ("5", "10", "20").index(name)
+
+    def configure_lagrange_axis(self, axis, dataset: DatasetState, analysis: DatasetAnalysis) -> None:
+        axis.clear()
+        axis.scatter(dataset.xs, dataset.ys, color="#0d6efd", zorder=2)
+        axis.set_title(f"Лагранж - {dataset.count} точок", fontsize=10)
+        axis.grid(True, alpha=0.25)
+        axis.set_xlim(
+            analysis.lagrange_limits[0],
+            analysis.lagrange_limits[1],
+        )
+        axis.set_ylim(
+            analysis.lagrange_limits[2],
+            analysis.lagrange_limits[3],
+        )
+        axis.set_xlabel("x")
+        axis.set_ylabel("y")
+        self.highlight_axis(axis, True)
+
+    def configure_lsm_axis(self, axis, dataset: DatasetState, analysis: DatasetAnalysis) -> None:
+        axis.clear()
+        axis.scatter(dataset.xs, dataset.ys, color="#0d6efd", zorder=2)
+        axis.set_title(f"МНК - {dataset.count} точок", fontsize=10)
+        axis.grid(True, alpha=0.25)
+        axis.set_xlim(
+            analysis.lsm_limits[0],
+            analysis.lsm_limits[1],
+        )
+        axis.set_ylim(
+            analysis.lsm_limits[2],
+            analysis.lsm_limits[3],
+        )
+        axis.set_xlabel("x")
+        axis.set_ylabel("y")
+        axis.text(
+            0.02,
+            0.96,
+            f"MSE={analysis.mse:.4f}\nMAE={analysis.mae:.4f}\nR²={analysis.r2:.4f}",
+            transform=axis.transAxes,
+            va="top",
+            fontsize=8.5,
+            bbox={"facecolor": "white", "alpha": 0.85, "edgecolor": "#94a3b8"},
+        )
+        self.highlight_axis(axis, True)
+
+    def start_animation(self) -> None:
+        if self.axes is None or self.canvas is None:
+            return
+
+        self.stop_animation()
+        self.refresh_plots()
+
+        dataset_name = self.active_dataset.get()
+        dataset = self.datasets[dataset_name]
+        analysis = analyse_dataset(dataset, int(self.degree_var.get()))
+        row_index = self.dataset_row_index(dataset_name)
+        lagrange_axis = self.axes[row_index, 0]
+        lsm_axis = self.axes[row_index, 1]
+        lagrange_visible = lagrange_axis.get_visible()
+        lsm_visible = lsm_axis.get_visible()
+
+        context: dict[str, object] = {
+            "dataset": dataset,
+            "analysis": analysis,
+            "row_index": row_index,
+            "baseline": np.full_like(analysis.x_plot, float(np.mean(dataset.ys))),
+            "frame_count": 0,
+            "lagrange_line": None,
+            "lagrange_nodes": None,
+            "lsm_line": None,
+            "lagrange_visible": lagrange_visible,
+            "lsm_visible": lsm_visible,
+        }
+
+        if lagrange_visible:
+            self.configure_lagrange_axis(lagrange_axis, dataset, analysis)
+            lagrange_line, = lagrange_axis.plot([], [], color="#f97316", linewidth=2.2)
+            lagrange_nodes = lagrange_axis.scatter([], [], color="#b45309", s=38, zorder=4)
+            context["lagrange_line"] = lagrange_line
+            context["lagrange_nodes"] = lagrange_nodes
+
+        if lsm_visible:
+            self.configure_lsm_axis(lsm_axis, dataset, analysis)
+            baseline = context["baseline"]
+            lsm_line, = lsm_axis.plot(
+                analysis.x_plot,
+                baseline,
+                color="#0f766e",
+                linewidth=2.2,
+            )
+            context["lsm_line"] = lsm_line
+
+        self.animation_context = context
+        frame_count = max(60, dataset.count * 8)
+        self.animation_context["frame_count"] = frame_count
+        self.animation = FuncAnimation(
+            self.figure,
+            self.animate_frame,
+            frames=frame_count,
+            interval=90,
+            blit=False,
+            repeat=False,
+        )
+        self.canvas.draw_idle()
+        self.status_var.set(
+            f"Запущено анімацію для набору {dataset_name}: вузли Лагранжа додаються по черзі, крива МНК плавно зростає."
+        )
+
+    def stop_animation(self) -> None:
+        if self.animation is not None:
+            self.animation.event_source.stop()
+            self.animation = None
+
+    def animate_lagrange(self, frame: int) -> None:
+        if not self.animation_context.get("lagrange_visible"):
+            return
+
+        dataset: DatasetState = self.animation_context["dataset"]  # type: ignore[assignment]
+        analysis: DatasetAnalysis = self.animation_context["analysis"]  # type: ignore[assignment]
+        lagrange_line = self.animation_context["lagrange_line"]
+        lagrange_nodes = self.animation_context["lagrange_nodes"]
+
+        if lagrange_line is None or lagrange_nodes is None:
+            return
+
+        total_nodes = dataset.count
+        node_count = min(total_nodes, 1 + frame // max(1, int(60 / total_nodes)))
+        partial_xs = dataset.xs[:node_count]
+        partial_ys = dataset.ys[:node_count]
+        partial_curve = lagrange(analysis.x_plot, partial_xs, partial_ys)
+
+        lagrange_line.set_data(analysis.x_plot, partial_curve)
+        lagrange_nodes.set_offsets(np.column_stack([partial_xs, partial_ys]))
+
+    def animate_lsm(self, frame: int) -> None:
+        if not self.animation_context.get("lsm_visible"):
+            return
+
+        analysis: DatasetAnalysis = self.animation_context["analysis"]  # type: ignore[assignment]
+        baseline = self.animation_context["baseline"]
+        lsm_line = self.animation_context["lsm_line"]
+
+        if lsm_line is None:
+            return
+
+        total_frames = max(1, int(self.animation_context.get("frame_count", 1)))
+        alpha = min(1.0, frame / total_frames)
+        animated_curve = baseline + alpha * (analysis.y_lsm - baseline)
+        lsm_line.set_data(analysis.x_plot, animated_curve)
+
+    def animate_frame(self, frame: int):
+        self.animate_lagrange(frame)
+        self.animate_lsm(frame)
+        return []
+
     def load_dataset_into_editor(self, name: str) -> None:
         if self.point_editor is None:
             return
@@ -583,6 +748,7 @@ class ApproximationApp:
         self.switch_dataset(self.active_dataset.get())
 
     def on_degree_changed(self, _event: object | None = None) -> None:
+        self.stop_animation()
         self.refresh_summary()
         self.refresh_plots()
         self.refresh_residual_plot()
@@ -594,6 +760,7 @@ class ApproximationApp:
         self.switch_mode(self.display_mode_var.get())
 
     def switch_dataset(self, name: str) -> None:
+        self.stop_animation()
         self.active_dataset.set(name)
         self.load_dataset_into_editor(name)
         self.refresh_summary()
@@ -601,6 +768,7 @@ class ApproximationApp:
         self.refresh_residual_plot()
 
     def switch_mode(self, mode: str) -> None:
+        self.stop_animation()
         if mode in LABEL_TO_MODE:
             self.display_mode_var.set(mode)
         elif mode in MODE_LABELS:
@@ -617,6 +785,7 @@ class ApproximationApp:
         if self.point_editor is None:
             return
 
+        self.stop_animation()
         name = self.active_dataset.get()
         expected_count = int(name)
         text = self.point_editor.get("1.0", tk.END)
@@ -636,6 +805,7 @@ class ApproximationApp:
         )
 
     def reset_active_dataset(self) -> None:
+        self.stop_animation()
         name = self.active_dataset.get()
         default = self.default_datasets[name]
         self.datasets[name] = DatasetState(
@@ -650,6 +820,7 @@ class ApproximationApp:
         self.refresh_residual_plot()
 
     def regenerate_extended_datasets(self) -> None:
+        self.stop_animation()
         source = self.datasets["5"]
         self.datasets["10"] = build_generated_dataset(source, 10)
         self.datasets["20"] = build_generated_dataset(source, 20)
