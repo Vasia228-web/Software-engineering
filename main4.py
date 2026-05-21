@@ -39,6 +39,27 @@ def build_generated_dataset(source: DatasetState, count: int) -> DatasetState:
     return DatasetState(name=str(count), xs=new_xs, ys=new_ys, generated=True)
 
 
+def lagrange(x: float | np.ndarray, xs: np.ndarray, ys: np.ndarray) -> float | np.ndarray:
+    x_values = np.asarray(x, dtype=float)
+    result = np.zeros_like(x_values, dtype=float)
+
+    for i in range(len(xs)):
+        basis = np.ones_like(x_values, dtype=float)
+        for j in range(len(xs)):
+            if i == j:
+                continue
+            basis *= (x_values - xs[j]) / (xs[i] - xs[j])
+        result += ys[i] * basis
+
+    if np.isscalar(x) or x_values.ndim == 0:
+        return float(result)
+    return result
+
+
+def build_dense_domain(xs: np.ndarray, points: int = 300) -> np.ndarray:
+    return np.linspace(float(xs.min()), float(xs.max()), points)
+
+
 def validate_points(xs: np.ndarray, ys: np.ndarray, expected_count: int) -> None:
     if len(xs) != len(ys):
         raise ValueError("Кількість X та Y повинна збігатися.")
@@ -221,10 +242,20 @@ class ApproximationApp:
         for name in ("5", "10", "20"):
             dataset = self.datasets[name]
             source = "generated" if dataset.generated else "manual"
+            lagrange_on_nodes = lagrange(dataset.xs, dataset.xs, dataset.ys)
+            max_node_error = float(np.max(np.abs(lagrange_on_nodes - dataset.ys)))
+            dense_x = build_dense_domain(dataset.xs, points=5)
+            dense_y = lagrange(dense_x, dataset.xs, dataset.ys)
             lines.append(f"Набір {name} точок ({source}):")
             lines.extend(
                 f"  ({x_value:.3f}, {y_value:.3f})"
                 for x_value, y_value in zip(dataset.xs, dataset.ys, strict=True)
+            )
+            lines.append(f"  Контроль Лагранжа у вузлах: max error = {max_node_error:.3e}")
+            lines.append("  Пробні значення полінома Лагранжа:")
+            lines.extend(
+                f"    P({x_value:.3f}) = {y_value:.3f}"
+                for x_value, y_value in zip(dense_x, dense_y, strict=True)
             )
             lines.append("")
 
