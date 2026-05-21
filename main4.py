@@ -60,6 +60,39 @@ def build_dense_domain(xs: np.ndarray, points: int = 300) -> np.ndarray:
     return np.linspace(float(xs.min()), float(xs.max()), points)
 
 
+def build_lsm(xs: np.ndarray, ys: np.ndarray, degree: int) -> np.ndarray:
+    design_matrix = np.vander(xs, degree + 1, increasing=True)
+    coeffs, _, _, _ = np.linalg.lstsq(design_matrix, ys, rcond=None)
+    return coeffs
+
+
+def evaluate_polynomial(coeffs: np.ndarray, x: float | np.ndarray) -> float | np.ndarray:
+    x_values = np.asarray(x, dtype=float)
+    result = np.zeros_like(x_values, dtype=float)
+
+    for power, coeff in enumerate(coeffs):
+        result += coeff * np.power(x_values, power)
+
+    if np.isscalar(x) or x_values.ndim == 0:
+        return float(result)
+    return result
+
+
+def calc_metrics(ys: np.ndarray, yhat: np.ndarray) -> tuple[float, float, float]:
+    residuals = ys - yhat
+    mse = float(np.mean(np.square(residuals)))
+    mae = float(np.mean(np.abs(residuals)))
+    ss_res = float(np.sum(np.square(residuals)))
+    ss_tot = float(np.sum(np.square(ys - np.mean(ys))))
+
+    if ss_tot == 0:
+        r2 = 1.0 if ss_res == 0 else 0.0
+    else:
+        r2 = 1.0 - ss_res / ss_tot
+
+    return mse, mae, r2
+
+
 def validate_points(xs: np.ndarray, ys: np.ndarray, expected_count: int) -> None:
     if len(xs) != len(ys):
         raise ValueError("Кількість X та Y повинна збігатися.")
@@ -134,6 +167,7 @@ class ApproximationApp:
         }
 
         self.active_dataset = tk.StringVar(value="5")
+        self.degree_var = tk.StringVar(value="3")
         self.status_var = tk.StringVar(
             value="Оберіть набір точок або відредагуйте його через поле нижче."
         )
@@ -173,23 +207,37 @@ class ApproximationApp:
         dataset_combo.grid(row=0, column=1, sticky="w", padx=(8, 0))
         dataset_combo.bind("<<ComboboxSelected>>", self.on_dataset_changed)
 
+        ttk.Label(dataset_frame, text="Ступінь МНК:").grid(
+            row=1, column=0, sticky="w", pady=(8, 0)
+        )
+
+        degree_combo = ttk.Combobox(
+            dataset_frame,
+            textvariable=self.degree_var,
+            values=["2", "3", "4"],
+            state="readonly",
+            width=8,
+        )
+        degree_combo.grid(row=1, column=1, sticky="w", padx=(8, 0), pady=(8, 0))
+        degree_combo.bind("<<ComboboxSelected>>", self.on_degree_changed)
+
         ttk.Button(
             dataset_frame,
             text="Застосувати точки",
             command=self.apply_active_dataset,
-        ).grid(row=1, column=0, columnspan=2, sticky="we", pady=(10, 4))
+        ).grid(row=2, column=0, columnspan=2, sticky="we", pady=(10, 4))
 
         ttk.Button(
             dataset_frame,
             text="Скинути набір",
             command=self.reset_active_dataset,
-        ).grid(row=2, column=0, columnspan=2, sticky="we", pady=4)
+        ).grid(row=3, column=0, columnspan=2, sticky="we", pady=4)
 
         ttk.Button(
             dataset_frame,
             text="Згенерувати 10/20 з 5 точок",
             command=self.regenerate_extended_datasets,
-        ).grid(row=3, column=0, columnspan=2, sticky="we", pady=(4, 0))
+        ).grid(row=4, column=0, columnspan=2, sticky="we", pady=(4, 0))
 
         editor_frame = ttk.LabelFrame(left, text="Редактор точок", padding=10)
         editor_frame.pack(fill="both", expand=True, pady=(12, 0))
@@ -239,6 +287,7 @@ class ApproximationApp:
             return
 
         lines: list[str] = []
+        degree = int(self.degree_var.get())
         for name in ("5", "10", "20"):
             dataset = self.datasets[name]
             source = "generated" if dataset.generated else "manual"
@@ -246,6 +295,9 @@ class ApproximationApp:
             max_node_error = float(np.max(np.abs(lagrange_on_nodes - dataset.ys)))
             dense_x = build_dense_domain(dataset.xs, points=5)
             dense_y = lagrange(dense_x, dataset.xs, dataset.ys)
+            coeffs = build_lsm(dataset.xs, dataset.ys, degree)
+            lsm_on_nodes = evaluate_polynomial(coeffs, dataset.xs)
+            mse, mae, r2 = calc_metrics(dataset.ys, lsm_on_nodes)
             lines.append(f"Набір {name} точок ({source}):")
             lines.extend(
                 f"  ({x_value:.3f}, {y_value:.3f})"
@@ -256,6 +308,14 @@ class ApproximationApp:
             lines.extend(
                 f"    P({x_value:.3f}) = {y_value:.3f}"
                 for x_value, y_value in zip(dense_x, dense_y, strict=True)
+            )
+            lines.append(f"  МНК, ступінь {degree}:")
+            lines.append(
+                "    coefficients = "
+                + ", ".join(f"a{index}={coeff:.5f}" for index, coeff in enumerate(coeffs))
+            )
+            lines.append(
+                f"    MSE={mse:.6f}, MAE={mae:.6f}, R²={r2:.6f}"
             )
             lines.append("")
 
@@ -277,6 +337,12 @@ class ApproximationApp:
 
     def on_dataset_changed(self, _event: object | None = None) -> None:
         self.load_dataset_into_editor(self.active_dataset.get())
+
+    def on_degree_changed(self, _event: object | None = None) -> None:
+        self.refresh_summary()
+        self.status_var.set(
+            f"Ступінь МНК змінено на {self.degree_var.get()}. Параметри перераховано."
+        )
 
     def apply_active_dataset(self) -> None:
         if self.point_editor is None:
