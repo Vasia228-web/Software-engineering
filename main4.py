@@ -1,10 +1,21 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
+from pathlib import Path
 import tkinter as tk
 from tkinter import messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
 
+MPL_CONFIG_DIR = Path(__file__).resolve().parent / ".mplconfig"
+MPL_CONFIG_DIR.mkdir(exist_ok=True)
+CACHE_DIR = Path(__file__).resolve().parent / ".cache"
+CACHE_DIR.mkdir(exist_ok=True)
+os.environ.setdefault("MPLCONFIGDIR", str(MPL_CONFIG_DIR))
+os.environ.setdefault("XDG_CACHE_HOME", str(CACHE_DIR))
+
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from matplotlib.figure import Figure
 import numpy as np
 
 
@@ -31,6 +42,20 @@ class DatasetState:
     @property
     def count(self) -> int:
         return len(self.xs)
+
+
+@dataclass
+class DatasetAnalysis:
+    x_plot: np.ndarray
+    y_lagrange: np.ndarray
+    y_lsm: np.ndarray
+    coeffs: np.ndarray
+    residuals: np.ndarray
+    mse: float
+    mae: float
+    r2: float
+    lagrange_limits: tuple[float, float, float, float]
+    lsm_limits: tuple[float, float, float, float]
 
 
 def build_generated_dataset(source: DatasetState, count: int) -> DatasetState:
@@ -91,6 +116,60 @@ def calc_metrics(ys: np.ndarray, yhat: np.ndarray) -> tuple[float, float, float]
         r2 = 1.0 - ss_res / ss_tot
 
     return mse, mae, r2
+
+
+def auto_scale(
+    xs: np.ndarray,
+    ys: np.ndarray,
+    padding_ratio: float = 0.1,
+    min_padding: float = 0.5,
+) -> tuple[float, float, float, float]:
+    x_min = float(np.min(xs))
+    x_max = float(np.max(xs))
+    y_min = float(np.min(ys))
+    y_max = float(np.max(ys))
+
+    x_padding = max((x_max - x_min) * padding_ratio, min_padding)
+    y_padding = max((y_max - y_min) * padding_ratio, min_padding)
+
+    return (
+        x_min - x_padding,
+        x_max + x_padding,
+        y_min - y_padding,
+        y_max + y_padding,
+    )
+
+
+def analyse_dataset(dataset: DatasetState, degree: int) -> DatasetAnalysis:
+    x_plot = build_dense_domain(dataset.xs, points=400)
+    y_lagrange = lagrange(x_plot, dataset.xs, dataset.ys)
+    coeffs = build_lsm(dataset.xs, dataset.ys, degree)
+    y_lsm = evaluate_polynomial(coeffs, x_plot)
+    lsm_on_nodes = evaluate_polynomial(coeffs, dataset.xs)
+    residuals = dataset.ys - lsm_on_nodes
+    mse, mae, r2 = calc_metrics(dataset.ys, lsm_on_nodes)
+
+    lagrange_limits = auto_scale(
+        x_plot,
+        np.concatenate([y_lagrange, dataset.ys]),
+    )
+    lsm_limits = auto_scale(
+        x_plot,
+        np.concatenate([y_lsm, dataset.ys]),
+    )
+
+    return DatasetAnalysis(
+        x_plot=x_plot,
+        y_lagrange=y_lagrange,
+        y_lsm=y_lsm,
+        coeffs=coeffs,
+        residuals=residuals,
+        mse=mse,
+        mae=mae,
+        r2=r2,
+        lagrange_limits=lagrange_limits,
+        lsm_limits=lsm_limits,
+    )
 
 
 def validate_points(xs: np.ndarray, ys: np.ndarray, expected_count: int) -> None:
@@ -175,10 +254,14 @@ class ApproximationApp:
 
         self.point_editor: ScrolledText | None = None
         self.summary_text: tk.Text | None = None
+        self.figure: Figure | None = None
+        self.canvas: FigureCanvasTkAgg | None = None
+        self.axes: np.ndarray | None = None
 
         self.build_layout()
         self.load_dataset_into_editor("5")
         self.refresh_summary()
+        self.refresh_plots()
 
     def build_layout(self) -> None:
         outer = ttk.Frame(self.root, padding=12)
@@ -260,8 +343,17 @@ class ApproximationApp:
             foreground="#1f4f82",
         ).pack(fill="x", pady=(12, 0))
 
+        plots_frame = ttk.LabelFrame(right, text="Графіки Лагранжа та МНК", padding=8)
+        plots_frame.pack(fill="both", expand=True)
+
+        self.figure = Figure(figsize=(9.2, 7.0), dpi=100, constrained_layout=True)
+        self.axes = np.array(self.figure.subplots(3, 2), dtype=object)
+        self.canvas = FigureCanvasTkAgg(self.figure, master=plots_frame)
+        self.canvas.draw()
+        self.canvas.get_tk_widget().pack(fill="both", expand=True)
+
         summary_frame = ttk.LabelFrame(right, text="Поточний стан наборів", padding=10)
-        summary_frame.pack(fill="both", expand=True)
+        summary_frame.pack(fill="both", expand=False, pady=(12, 0))
 
         ttk.Label(
             summary_frame,
@@ -272,7 +364,7 @@ class ApproximationApp:
             justify="left",
         ).pack(anchor="w")
 
-        self.summary_text = tk.Text(summary_frame, wrap="word", height=28, font=("Courier New", 11))
+        self.summary_text = tk.Text(summary_frame, wrap="word", height=14, font=("Courier New", 10))
         self.summary_text.pack(fill="both", expand=True, pady=(10, 0))
         self.summary_text.configure(state="disabled")
 
@@ -295,9 +387,7 @@ class ApproximationApp:
             max_node_error = float(np.max(np.abs(lagrange_on_nodes - dataset.ys)))
             dense_x = build_dense_domain(dataset.xs, points=5)
             dense_y = lagrange(dense_x, dataset.xs, dataset.ys)
-            coeffs = build_lsm(dataset.xs, dataset.ys, degree)
-            lsm_on_nodes = evaluate_polynomial(coeffs, dataset.xs)
-            mse, mae, r2 = calc_metrics(dataset.ys, lsm_on_nodes)
+            analysis = analyse_dataset(dataset, degree)
             lines.append(f"Набір {name} точок ({source}):")
             lines.extend(
                 f"  ({x_value:.3f}, {y_value:.3f})"
@@ -312,10 +402,13 @@ class ApproximationApp:
             lines.append(f"  МНК, ступінь {degree}:")
             lines.append(
                 "    coefficients = "
-                + ", ".join(f"a{index}={coeff:.5f}" for index, coeff in enumerate(coeffs))
+                + ", ".join(
+                    f"a{index}={coeff:.5f}"
+                    for index, coeff in enumerate(analysis.coeffs)
+                )
             )
             lines.append(
-                f"    MSE={mse:.6f}, MAE={mae:.6f}, R²={r2:.6f}"
+                f"    MSE={analysis.mse:.6f}, MAE={analysis.mae:.6f}, R²={analysis.r2:.6f}"
             )
             lines.append("")
 
@@ -323,6 +416,71 @@ class ApproximationApp:
         self.summary_text.delete("1.0", tk.END)
         self.summary_text.insert("1.0", "\n".join(lines).strip())
         self.summary_text.configure(state="disabled")
+
+    def refresh_plots(self) -> None:
+        if self.axes is None or self.figure is None or self.canvas is None:
+            return
+
+        degree = int(self.degree_var.get())
+
+        for row_index, name in enumerate(("5", "10", "20")):
+            dataset = self.datasets[name]
+            analysis = analyse_dataset(dataset, degree)
+            lagrange_axis = self.axes[row_index, 0]
+            lsm_axis = self.axes[row_index, 1]
+
+            lagrange_axis.clear()
+            lagrange_axis.scatter(dataset.xs, dataset.ys, color="#0d6efd", zorder=3)
+            lagrange_axis.plot(
+                analysis.x_plot,
+                analysis.y_lagrange,
+                color="#f97316",
+                linewidth=2,
+            )
+            lagrange_axis.set_title(f"Лагранж - {name} точок", fontsize=10)
+            lagrange_axis.grid(True, alpha=0.25)
+            lagrange_axis.set_xlim(
+                analysis.lagrange_limits[0],
+                analysis.lagrange_limits[1],
+            )
+            lagrange_axis.set_ylim(
+                analysis.lagrange_limits[2],
+                analysis.lagrange_limits[3],
+            )
+            lagrange_axis.set_xlabel("x")
+            lagrange_axis.set_ylabel("y")
+
+            lsm_axis.clear()
+            lsm_axis.scatter(dataset.xs, dataset.ys, color="#0d6efd", zorder=3)
+            lsm_axis.plot(
+                analysis.x_plot,
+                analysis.y_lsm,
+                color="#0f766e",
+                linewidth=2,
+            )
+            lsm_axis.set_title(f"МНК - {name} точок", fontsize=10)
+            lsm_axis.grid(True, alpha=0.25)
+            lsm_axis.set_xlim(
+                analysis.lsm_limits[0],
+                analysis.lsm_limits[1],
+            )
+            lsm_axis.set_ylim(
+                analysis.lsm_limits[2],
+                analysis.lsm_limits[3],
+            )
+            lsm_axis.set_xlabel("x")
+            lsm_axis.set_ylabel("y")
+            lsm_axis.text(
+                0.02,
+                0.96,
+                f"MSE={analysis.mse:.4f}\nMAE={analysis.mae:.4f}\nR²={analysis.r2:.4f}",
+                transform=lsm_axis.transAxes,
+                va="top",
+                fontsize=8.5,
+                bbox={"facecolor": "white", "alpha": 0.85, "edgecolor": "#94a3b8"},
+            )
+
+        self.canvas.draw_idle()
 
     def load_dataset_into_editor(self, name: str) -> None:
         if self.point_editor is None:
@@ -340,6 +498,7 @@ class ApproximationApp:
 
     def on_degree_changed(self, _event: object | None = None) -> None:
         self.refresh_summary()
+        self.refresh_plots()
         self.status_var.set(
             f"Ступінь МНК змінено на {self.degree_var.get()}. Параметри перераховано."
         )
@@ -360,6 +519,7 @@ class ApproximationApp:
 
         self.datasets[name] = DatasetState(name=name, xs=xs, ys=ys, generated=False)
         self.refresh_summary()
+        self.refresh_plots()
         self.status_var.set(
             f"Набір {name} оновлено. Збережено {expected_count} коректних точок."
         )
@@ -375,12 +535,14 @@ class ApproximationApp:
         )
         self.load_dataset_into_editor(name)
         self.refresh_summary()
+        self.refresh_plots()
 
     def regenerate_extended_datasets(self) -> None:
         source = self.datasets["5"]
         self.datasets["10"] = build_generated_dataset(source, 10)
         self.datasets["20"] = build_generated_dataset(source, 20)
         self.refresh_summary()
+        self.refresh_plots()
         self.status_var.set(
             "Набори 10 і 20 точок перевизначено лінійною інтерполяцією з базових 5 точок."
         )
